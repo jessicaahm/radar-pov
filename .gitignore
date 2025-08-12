@@ -1,0 +1,65 @@
+# Environment variables and sensitive files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+*.env
+
+# Secrets and credentials
+*.key
+*.crt
+*.pem
+*.p12
+*.pfx
+agent-secret.yaml
+*secret*.yaml
+*credentials*
+*password*
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Kubernetes generated files
+*.kubeconfig
+kubeconfig*
+
+# Local development
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build artifacts
+dist/
+build/
+target/
+
+# Terraform
+*.tfstate
+*.tfstate.backup
+.terraform/
+*.tfplan

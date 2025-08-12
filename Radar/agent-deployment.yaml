@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault-radar-agent
+  namespace: vault-radar
+  labels:
+    app: vault-radar-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vault-radar-agent
+  template:
+    metadata:
+      labels:
+        app: vault-radar-agent
+    spec:
+      serviceAccountName: vault-radar-agent
+      automountServiceAccountToken: true
+      containers:
+        - name: vault-radar-agent
+          image: docker.io/hashicorp/vault-radar:latest
+          command: ["vault-radar"]
+          args: ["agent", "exec"]
+          imagePullPolicy: Always
+          tty: true
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 1024Mi
+            requests:
+              cpu: 100m
+              memory: 512Mi
+          env:
+            - name: HCP_PROJECT_ID
+              value: 2926ccbc-0068-4fa9-91fb-e847f43dadd6 
+            - name: HCP_RADAR_AGENT_POOL_ID
+              value: a3e6f4fa-e14f-4b1a-ba52-2b75e95398e2
+            - name: HCP_CLIENT_ID
+              value: X3tNW9vKSHmKcfcEnMkadrZOBqZDsUbK
+            - name: HCP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: vault-radar-secrets
+                  key: HCP_CLIENT_SECRET
+            - name: VAULT_RADAR_GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vault-radar-secrets
+                  key: VAULT_RADAR_GIT_TOKEN

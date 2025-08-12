@@ -1,0 +1,335 @@
+# Jira Kubernetes Deployment Manifest
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jira
+---
+# PostgreSQL Database for Jira
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: jira
+type: Opaque
+data:
+  # postgres / password123 (base64 encoded)
+  username: cG9zdGdyZXM=
+  password: cGFzc3dvcmQxMjM=
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: jira
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: jira
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:13
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        - name: POSTGRES_DB
+          value: jira
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: jira
+spec:
+  selector:
+    app: postgres
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+---
+# Jira Application
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jira-pvc
+  namespace: jira
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jira
+  namespace: jira
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jira
+  template:
+    metadata:
+      labels:
+        app: jira
+    spec:
+      containers:
+      - name: jira
+        image: atlassian/jira-software:9.12
+        env:
+        - name: ATL_PROXY_NAME
+          value: "jira.local"
+        - name: ATL_PROXY_PORT
+          value: "443"
+        - name: ATL_TOMCAT_SCHEME
+          value: "https"
+        - name: ATL_TOMCAT_SECURE
+          value: "true"
+        - name: ATL_TOMCAT_CONTEXTPATH
+          value: ""
+        - name: ATL_TOMCAT_PORT
+          value: "8080"
+        - name: ATL_TOMCAT_MAXTHREADS
+          value: "200"
+        - name: ATL_TOMCAT_MINSPARETHREADS
+          value: "10"
+        - name: ATL_TOMCAT_CONNECTIONTIMEOUT
+          value: "20000"
+        - name: ATL_TOMCAT_ENABLELOOKUPS
+          value: "false"
+        - name: ATL_TOMCAT_PROTOCOL
+          value: "HTTP/1.1"
+        - name: ATL_TOMCAT_ACCEPTCOUNT
+          value: "10"
+        - name: JVM_MINIMUM_MEMORY
+          value: "2048m"
+        - name: JVM_MAXIMUM_MEMORY
+          value: "4096m"
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: jira-home
+          mountPath: /var/atlassian/application-data/jira
+        - name: server-xml-volume
+          mountPath: /opt/atlassian/jira/conf/server.xml
+          subPath: server.xml
+        resources:
+          requests:
+            memory: "3Gi"
+            cpu: "1"
+          limits:
+            memory: "5Gi"
+            cpu: "2"
+        readinessProbe:
+          httpGet:
+            path: /status
+            port: 8080
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /status
+            port: 8080
+          initialDelaySeconds: 180
+          periodSeconds: 60
+          timeoutSeconds: 10
+      volumes:
+      - name: jira-home
+        persistentVolumeClaim:
+          claimName: jira-pvc
+      - name: server-xml-volume
+        configMap:
+          name: jira-server-xml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jira-service
+  namespace: jira
+spec:
+  selector:
+    app: jira
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+# NGINX ConfigMap for reverse proxy configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: jira
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+    
+    http {
+        upstream jira-backend {
+            server jira-service:8080;
+        }
+        
+        # Redirect HTTP to HTTPS
+        server {
+            listen 80;
+            server_name _;
+            return 301 https://$host$request_uri;
+        }
+        
+        # HTTPS Server
+        server {
+            listen 443 ssl;
+            server_name _;
+
+            # Set specific proxy headers
+            proxy_set_header Host $host;
+            
+            # SSL Certificate Configuration
+            ssl_certificate /etc/nginx/ssl/tls.crt;
+            ssl_certificate_key /etc/nginx/ssl/tls.key;
+            
+            # SSL Settings
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+            ssl_prefer_server_ciphers off;
+            ssl_session_cache shared:SSL:10m;
+            ssl_session_timeout 10m;
+            
+            location /jira {
+                proxy_set_header Host $host;
+                proxy_set_header X-Forwarded-Host $host;
+                proxy_set_header X-Forwarded-Server $host;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_pass http://jira-backend/jira;
+                client_max_body_size 10M;
+                
+                # Additional proxy settings for better compatibility
+                proxy_redirect off;
+                proxy_buffering off;
+            }
+        }
+    }
+---
+# NGINX Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: jira
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.25
+        ports:
+        - containerPort: 80
+        - containerPort: 443
+        volumeMounts:
+        - name: nginx-config-volume
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        - name: ssl-certs
+          mountPath: /etc/nginx/ssl
+          readOnly: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: nginx-config-volume
+        configMap:
+          name: nginx-config
+      - name: ssl-certs
+        secret:
+          secretName: nginx-tls
+---
+# NGINX Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+  namespace: jira
+spec:
+  selector:
+    app: nginx
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 80
+    - name: https
+      protocol: TCP
+      port: 443
+      targetPort: 443
+  type: ClusterIP
+---
+# LoadBalancer Service for external access (via NGINX)
+apiVersion: v1
+kind: Service
+metadata:
+  name: jira-loadbalancer
+  namespace: jira
+spec:
+  type: LoadBalancer
+  selector:
+    app: jira
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
