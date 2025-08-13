@@ -6,7 +6,7 @@ metadata:
   labels:
     app: vault-radar-agent
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: vault-radar-agent
@@ -19,10 +19,10 @@ spec:
       automountServiceAccountToken: true
       containers:
         - name: vault-radar-agent
-          image: docker.io/hashicorp/vault-radar:latest
+          image: vault-radar-custom:latest
           command: ["vault-radar"]
           args: ["agent", "exec"]
-          imagePullPolicy: Always
+          imagePullPolicy: Never
           tty: true
           resources:
             limits:
@@ -48,3 +48,27 @@ spec:
                 secretKeyRef:
                   name: vault-radar-secrets
                   key: VAULT_RADAR_GIT_TOKEN
+            - name: JIRA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vault-radar-secrets
+                  key: JIRA_TOKEN
+         # SSL Certificate configuration
+            - name: SSL_CERT_FILE
+              value: "/etc/ssl/certs/jira-ca.crt"
+            - name: REQUESTS_CA_BUNDLE
+              value: "/etc/ssl/certs/jira-ca.crt"
+            - name: CURL_CA_BUNDLE
+              value: "/etc/ssl/certs/jira-ca.crt"
+          volumeMounts:
+            - name: jira-ssl-cert
+              mountPath: /etc/ssl/certs/jira-ca.crt
+              subPath: tls.crt
+              readOnly: true
+      volumes:
+        - name: jira-ssl-cert
+          secret:
+            secretName: nginx-tls
+            items:
+            - key: tls.crt
+              path: tls.crt

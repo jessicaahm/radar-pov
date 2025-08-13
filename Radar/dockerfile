@@ -1,0 +1,26 @@
+FROM docker.io/hashicorp/vault-radar:latest
+
+# Switch to root to install certificates
+USER root
+
+# Install ca-certificates package (for Alpine or Debian)
+RUN apk add --no-cache ca-certificates 2>/dev/null || \
+    apt-get update && apt-get install -y ca-certificates 2>/dev/null || \
+    yum install -y ca-certificates 2>/dev/null || true
+
+# Copy the certificate
+COPY tls.crt /usr/local/share/ca-certificates/jira-ca.crt
+
+# Update CA certificates
+RUN update-ca-certificates 2>/dev/null || \
+    c_rehash /etc/ssl/certs 2>/dev/null || true
+
+# Set environment variables for SSL
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+# Keep the original entrypoint
+ENTRYPOINT ["vault-radar"]
+CMD ["agent", "exec"]
