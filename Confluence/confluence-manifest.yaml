@@ -1,0 +1,402 @@
+# Confluence Kubernetes Deployment Manifest
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: confluence
+---
+# PostgreSQL Database for Confluence
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: confluence
+type: Opaque
+data:
+  # confdb / confdb (base64 encoded)
+  username: Y29uZmRi
+  password: Y29uZmRi
+  database: Y29uZmRi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: confluence
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgresql
+  namespace: confluence
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgresql
+  template:
+    metadata:
+      labels:
+        app: postgresql
+    spec:
+      containers:
+      - name: postgresql
+        image: postgres:13
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: database
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-service
+  namespace: confluence
+spec:
+  selector:
+    app: postgresql
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+---
+# Confluence Application
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: confluence-home-pvc
+  namespace: confluence
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: confluence-server-xml
+  namespace: confluence
+data:
+  server.xml: |
+    <?xml version="1.0" encoding="utf-8"?>
+    <Server port="8000" shutdown="SHUTDOWN" debug="0">
+        <Service name="Tomcat-Standalone">
+            <Connector port="8090" connectionTimeout="20000" redirectPort="8443"
+                       maxThreads="48" minSpareThreads="10"
+                       enableLookups="false" acceptCount="10" debug="0" URIEncoding="UTF-8"
+                       protocol="org.apache.coyote.http11.Http11NioProtocol"/>
+            
+            <!-- HTTPS Connector with PKCS12 keystore -->
+            <Connector port="8091" 
+                       maxThreads="150" 
+                       minSpareThreads="25" 
+                       connectionTimeout="20000"
+                       enableLookups="false" 
+                       maxHttpHeaderSize="8192"
+                       protocol="org.apache.coyote.http11.Http11NioProtocol" 
+                       SSLEnabled="true"
+                       maxKeepAliveRequests="15" 
+                       keepAliveTimeout="20000"
+                       keystoreFile="/opt/confluence/conf/confluence.p12"
+                       keystoreType="PKCS12"
+                       keystorePass="changeit"
+                       secure="true" 
+                       scheme="https" 
+                       clientAuth="false" 
+                       sslProtocol="TLS" />
+            
+            <Engine name="Standalone" defaultHost="localhost" debug="0">
+                <Host name="localhost" debug="0" appBase="webapps" unpackWARs="true" autoDeploy="false" startStopThreads="4">
+                    <Context path="" docBase="../confluence" debug="0" reloadable="false" useHttpOnly="true">
+                        <Manager pathname=""/>
+                    </Context>
+                </Host>
+            </Engine>
+        </Service>
+    </Server>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: confluence-server
+  namespace: confluence
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: confluence-server
+  template:
+    metadata:
+      labels:
+        app: confluence-server
+    spec:
+      containers:
+      - name: confluence-server
+        image: atlassian/confluence:latest
+        env:
+        - name: ATL_JDBC_URL
+          value: "jdbc:postgresql://postgresql-service:5432/confdb"
+        - name: ATL_JDBC_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: ATL_JDBC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        - name: ATL_DB_TYPE
+          value: "postgresql"
+        - name: ATL_DB_DRIVER
+          value: "org.postgresql.Driver"
+        - name: ATL_DB_SCHEMA_NAME
+          value: "public"
+        - name: JVM_MINIMUM_MEMORY
+          value: "2048m"
+        - name: JVM_MAXIMUM_MEMORY
+          value: "4096m"
+        ports:
+        - containerPort: 8090
+        - containerPort: 8091
+        volumeMounts:
+        - name: confluence-home
+          mountPath: /var/atlassian/application-data/confluence
+        - name: confluence-keystore
+          mountPath: /opt/confluence/conf/confluence.p12
+          subPath: confluence.p12
+        - name: server-xml-volume
+          mountPath: /opt/atlassian/confluence/conf/server.xml
+          subPath: server.xml
+        resources:
+          requests:
+            memory: "3Gi"
+            cpu: "1"
+          limits:
+            memory: "5Gi"
+            cpu: "2"
+        readinessProbe:
+          httpGet:
+            path: /status
+            port: 8090
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /status
+            port: 8090
+          initialDelaySeconds: 180
+          periodSeconds: 60
+          timeoutSeconds: 10
+      volumes:
+      - name: confluence-home
+        persistentVolumeClaim:
+          claimName: confluence-home-pvc
+      - name: confluence-keystore
+        configMap:
+          name: confluence-keystore-config
+      - name: server-xml-volume
+        configMap:
+          name: confluence-server-xml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: confluence-service
+  namespace: confluence
+spec:
+  selector:
+    app: confluence-server
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8090
+      targetPort: 8090
+    - name: https
+      protocol: TCP
+      port: 8091
+      targetPort: 8091
+  type: ClusterIP
+---
+# NGINX ConfigMap for reverse proxy configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: confluence
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+    
+    http {
+        upstream confluence-backend {
+            server confluence-service:8090;
+        }
+        
+        # HTTPS Server
+        server {
+            listen 443 ssl;
+            server_name confluence.local;
+            
+            # SSL Certificate Configuration
+            ssl_certificate /etc/nginx/ssl/tls.crt;
+            ssl_certificate_key /etc/nginx/ssl/tls.key;
+            
+            # SSL Settings
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+            ssl_prefer_server_ciphers off;
+            ssl_session_cache shared:SSL:10m;
+            ssl_session_timeout 10m;
+            
+            location / {
+                proxy_set_header Host $host;
+                proxy_set_header X-Forwarded-Host $host;
+                proxy_set_header X-Forwarded-Server $host;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_pass http://confluence-backend;
+                client_max_body_size 100M;
+                
+                # Additional proxy settings for Confluence
+                proxy_redirect off;
+                proxy_buffering off;
+                proxy_connect_timeout 300;
+                proxy_send_timeout 300;
+                proxy_read_timeout 300;
+            }
+        }
+    }
+---
+# NGINX Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: confluence
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:stable-perl
+        ports:
+        - containerPort: 443
+        volumeMounts:
+        - name: nginx-config-volume
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        - name: ssl-certs
+          mountPath: /etc/nginx/ssl
+          readOnly: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: nginx-config-volume
+        configMap:
+          name: nginx-config
+      - name: ssl-certs
+        secret:
+          secretName: nginx-tls
+---
+# NGINX Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+  namespace: confluence
+spec:
+  selector:
+    app: nginx
+  ports:
+    - name: https
+      protocol: TCP
+      port: 443
+      targetPort: 443
+  type: ClusterIP
+---
+# LoadBalancer Service for external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: confluence-loadbalancer
+  namespace: confluence
+spec:
+  type: LoadBalancer
+  selector:
+    app: confluence-server
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8090
+      targetPort: 8090
+    - name: https-direct
+      protocol: TCP
+      port: 8091
+      targetPort: 8091
+---
+# ConfigMap for confluence.p12 keystore (placeholder)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: confluence-keystore-config
+  namespace: confluence
+data:
+  confluence.p12: |
+    # This is a placeholder for your PKCS12 keystore file
+    # You need to replace this with the base64 encoded content of your confluence.p12 file
+    # Use: base64 -i confluence.p12 | tr -d '\n' > confluence.p12.b64
+    # Then copy the content here
+binaryData:
+  confluence.p12: ""  # Base64 encoded keystore file goes here
