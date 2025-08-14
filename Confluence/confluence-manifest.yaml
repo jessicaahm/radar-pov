@@ -70,11 +70,11 @@ spec:
           mountPath: /var/lib/postgresql/data
         resources:
           requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
             memory: "512Mi"
             cpu: "250m"
-          limits:
-            memory: "1Gi"
-            cpu: "500m"
       volumes:
       - name: postgres-storage
         persistentVolumeClaim:
@@ -104,51 +104,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 20Gi
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: confluence-server-xml
-  namespace: confluence
-data:
-  server.xml: |
-    <?xml version="1.0" encoding="utf-8"?>
-    <Server port="8000" shutdown="SHUTDOWN" debug="0">
-        <Service name="Tomcat-Standalone">
-            <Connector port="8090" connectionTimeout="20000" redirectPort="8443"
-                       maxThreads="48" minSpareThreads="10"
-                       enableLookups="false" acceptCount="10" debug="0" URIEncoding="UTF-8"
-                       protocol="org.apache.coyote.http11.Http11NioProtocol"/>
-            
-            <!-- HTTPS Connector with PKCS12 keystore -->
-            <Connector port="8091" 
-                       maxThreads="150" 
-                       minSpareThreads="25" 
-                       connectionTimeout="20000"
-                       enableLookups="false" 
-                       maxHttpHeaderSize="8192"
-                       protocol="org.apache.coyote.http11.Http11NioProtocol" 
-                       SSLEnabled="true"
-                       maxKeepAliveRequests="15" 
-                       keepAliveTimeout="20000"
-                       keystoreFile="/opt/confluence/conf/confluence.p12"
-                       keystoreType="PKCS12"
-                       keystorePass="changeit"
-                       secure="true" 
-                       scheme="https" 
-                       clientAuth="false" 
-                       sslProtocol="TLS" />
-            
-            <Engine name="Standalone" defaultHost="localhost" debug="0">
-                <Host name="localhost" debug="0" appBase="webapps" unpackWARs="true" autoDeploy="false" startStopThreads="4">
-                    <Context path="" docBase="../confluence" debug="0" reloadable="false" useHttpOnly="true">
-                        <Manager pathname=""/>
-                    </Context>
-                </Host>
-            </Engine>
-        </Service>
-    </Server>
+      storage: 5Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -191,15 +147,16 @@ spec:
           value: "2048m"
         - name: JVM_MAXIMUM_MEMORY
           value: "4096m"
+        - name: CATALINA_OPTS
+          value: "-Xms2048m -Xmx4096m -Datlassian.plugins.enable.wait=300 -Djava.awt.headless=true -XX:+UseG1GC"
+        - name: JVM_SUPPORT_RECOMMENDED_ARGS
+          value: "-Datlassian.plugins.enable.wait=300"
         ports:
         - containerPort: 8090
         - containerPort: 8091
         volumeMounts:
         - name: confluence-home
           mountPath: /var/atlassian/application-data/confluence
-        - name: confluence-keystore
-          mountPath: /opt/confluence/conf/confluence.p12
-          subPath: confluence.p12
         - name: server-xml-volume
           mountPath: /opt/atlassian/confluence/conf/server.xml
           subPath: server.xml
@@ -214,26 +171,25 @@ spec:
           httpGet:
             path: /status
             port: 8090
-          initialDelaySeconds: 120
-          periodSeconds: 30
-          timeoutSeconds: 10
+          initialDelaySeconds: 300
+          periodSeconds: 60
+          timeoutSeconds: 30
+          failureThreshold: 10
         livenessProbe:
           httpGet:
             path: /status
             port: 8090
-          initialDelaySeconds: 180
-          periodSeconds: 60
-          timeoutSeconds: 10
+          initialDelaySeconds: 400
+          periodSeconds: 120
+          timeoutSeconds: 30
+          failureThreshold: 5
       volumes:
       - name: confluence-home
         persistentVolumeClaim:
           claimName: confluence-home-pvc
-      - name: confluence-keystore
-        configMap:
-          name: confluence-keystore-config
       - name: server-xml-volume
         configMap:
-          name: confluence-server-xml
+          name: confluence-server-xml-file
 ---
 apiVersion: v1
 kind: Service
@@ -274,7 +230,7 @@ data:
         # HTTPS Server
         server {
             listen 443 ssl;
-            server_name confluence.local;
+            server_name _;
             
             # SSL Certificate Configuration
             ssl_certificate /etc/nginx/ssl/tls.crt;
@@ -337,11 +293,11 @@ spec:
           readOnly: true
         resources:
           requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
             memory: "128Mi"
             cpu: "100m"
-          limits:
-            memory: "256Mi"
-            cpu: "200m"
       volumes:
       - name: nginx-config-volume
         configMap:
@@ -385,18 +341,4 @@ spec:
       protocol: TCP
       port: 8091
       targetPort: 8091
----
-# ConfigMap for confluence.p12 keystore (placeholder)
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: confluence-keystore-config
-  namespace: confluence
-data:
-  confluence.p12: |
-    # This is a placeholder for your PKCS12 keystore file
-    # You need to replace this with the base64 encoded content of your confluence.p12 file
-    # Use: base64 -i confluence.p12 | tr -d '\n' > confluence.p12.b64
-    # Then copy the content here
-binaryData:
-  confluence.p12: ""  # Base64 encoded keystore file goes here
+

@@ -53,6 +53,11 @@ spec:
                 secretKeyRef:
                   name: vault-radar-secrets
                   key: JIRA_TOKEN
+            - name: GITHUB_APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: radar-github-secret
+                  key: private-key
          # SSL Certificate configuration
             - name: SSL_CERT_FILE
               value: "/etc/ssl/certs/jira-ca.crt"

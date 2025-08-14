@@ -40,7 +40,7 @@ services:
       - ./nginx.conf:/etc/nginx/nginx.conf
       - ./ssl:/etc/nginx/ssl
     ports:
-      - "443:443"
+      - "444:444"
     depends_on:
       - confluence-server
 

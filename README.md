@@ -1,5 +1,11 @@
 # radar-pov
 
+> This installation is done in minikube. May have memory issue if both confluence and jira is up at once.
+
+Other possible way to use helm chart: https://atlassian.github.io/data-center-helm-charts/userguide/INSTALLATION/
+
+Configure Jira to run behind a nginx reverse proxy: https://support.atlassian.com/jira/kb/configure-jira-to-run-behind-a-nginx-reverse-proxy/
+
 ```sh
 #minikube start
 minikube start --memory=7837 --cpus=4
@@ -13,29 +19,76 @@ kubectl get all --all-namespaces
 minikube status
 ```
 
-## Deploy Confluence
+## Confluence
+
+Reference: https://hub.docker.com/r/atlassian/confluence-server
 
 ```sh
-# generate certificates
-cd ./vault-radar-demo/confluence/ssl
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout selfsigned.key \
-  -out selfsigned.crt \
-  -config sans.cnf
+# Generate a private key
+openssl genrsa -out tls.key 2048
+
+# Generate a certificate signing request and self-signed certificate
+openssl req -new -x509 -key tls.key -out tls.crt -days 365 \
+  -subj "/CN=nginx-service.confluence.svc.cluster.local" \
+  -addext "subjectAltName=DNS:nginx-service.confluence.svc.cluster.local,DNS:confluence.local"
 ```
 
 ```sh
-# Create namespace if it doesn't exist
-kubectl create namespace confluence 
+# Verify ConfigMap was created
+kubectl get configmap confluence-server-xml-file -n confluence
+
+# View the full ConfigMap YAML (including the server.xml content)
+kubectl get configmap confluence-server-xml-file -n confluence -o yaml
+```
+
+```sh {"terminalRows":"11"}
+# Apply the Confluence manifest
+cd ./Confluence
+kubectl apply -f confluence-manifest.yaml -n confluence
 ```
 
 ```sh
-cd Confluence/ssl
-kubectl create secret tls nginx-tls --cert=selfsigned.crt --key=selfsigned.key -n confluence
+# Start minikube tunnel (run in background)
+minikube tunnel
 ```
 
 ```sh
+kubectl get svc -n confluence
+```
 
+## Troubleshooting to reduce size (memory)
+
+```sh
+# ...existing code...
+# Apply the Confluence manifest
+cd ./Confluence
+
+# Scale down deployment to 0 replicas
+kubectl scale deployment confluence-server -n confluence --replicas=0 
+kubectl scale deployment postgresql -n confluence --replicas=0
+
+# Delete existing PVCs if they exist (to allow size reduction)
+kubectl delete pvc confluence-home-pvc -n confluence --ignore-not-found
+kubectl delete pvc postgres-pvc -n confluence --ignore-not-found
+
+# Force remove PVC finalizers if stuck
+kubectl patch pvc confluence-home-pvc -n confluence -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+kubectl patch pvc postgres-pvc -n confluence -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+
+# Apply the manifest with new PVC sizes
+kubectl apply -f confluence-manifest.yaml -n confluence
+kubectl scale deployment postgresql -n confluence --replicas=1
+kubectl scale deployment confluence-server -n confluence --replicas=1 2>/dev/null || true
+
+```
+
+```sh {"terminalRows":"15"}
+# check svc and pods    
+kubectl get svc -n confluence
+kubectl get pods -n confluence
+
+# https://nginx-service.confluence.svc.cluster.local
+# https://confluence-service.confluence.svc.cluster.local 
 ```
 
 ## Deploy Jira (Simplified Setup)
@@ -84,18 +137,6 @@ kubectl get po -n jira
 sudo kubectl port-forward -n jira svc/nginx-service 443:443
 ```
 
-```sh
-# Set up Jira with License key
-# Start minikube tunnel (run in background)
-minikube tunnel &
-
-# Check if external IP is assigned to LoadBalancer services
-kubectl get svc -n jira
-
-# Access via the external IP shown for jira-loadbalancer
-# http://EXTERNAL_IP:8080/jira
-```
-
 To test scanning, you will have to create issue in Jira board manually [To provide script for this in the future]
 
 ## Troubleshooting - Jira
@@ -110,34 +151,16 @@ kubectl logs -n jira jira-c95667c4c-kphrb  -f
 minikube service jira-loadbalancer -n jira --url
 ```
 
-```sh
-# Check probes
-kubectl exec -n jira deployment/jira -- curl -I http://localhost:8080/jira/status
-```
-
-```sh
-# Scale down to delete the deployment
-kubectl scale deployment jira -n jira --replicas=0
-
-# Scale up to redeploy
-kubectl scale deployment jira -n jira --replicas=1
-
-# Delete Database
-kubectl delete pvc postgres-pvc -n jira
-kubectl patch pvc postgres-pvc -n jira -p '{"metadata":{"finalizers":null}}' --type=merge
-
-```
-
-```sh
-# To redeploy Jira
-# Restart NGINX to pick up the new wildcard config
-kubectl rollout restart deployment/jira -n jira
-
-# Delete config map
-kubectl delete configmap jira-server-xml -n jira --ignore-not-found
-```
-
 ## Radar deployment
+
+```sh
+# Build docker container to add the self-signed certificate to agent
+cd ./Radar
+docker build -t vault-radar-custom:latest .
+
+# Add to minikube the new docker container
+minikube image load vault-radar-custom:latest   
+```
 
 ```sh
 # Apply agent manifest
@@ -156,6 +179,7 @@ export HCP_CLIENT_SECRET=$(cat .env | grep HCP_CLIENT_SECRET | cut -d '=' -f2)
 export VAULT_RADAR_GIT_TOKEN=$(cat .env | grep VAULT_RADAR_GIT_TOKEN | cut -d '=' -f2)
 export JIRA_TOKEN=$(cat .env | grep JIRA_TOKEN | cut -d '=' -f2)
 export CONFLUENCE_TOKEN=$(cat .env | grep CONFLUENCE_TOKEN | cut -d '=' -f2)
+export HCP_CLIENT_ID=$(cat .env | grep HCP_CLIENT_ID | cut -d '=' -f2)
 
 # Base64 encode the client ID and secret    
 export HCP_CLIENT_ID_BASE64=$(echo -n "$HCP_CLIENT_ID" | base64)
@@ -268,12 +292,6 @@ EOF
 ```
 
 ```sh
-# Apply all YAML files in the Radar directory
-cd ./Radar
-kubectl apply -f .
-```
-
-```sh
 # Or apply specific files one by one:
 # kubectl apply -f agent-manifest.yaml
 echo "HCP_CLIENT_SECRET_B64=$(echo -n "$HCP_CLIENT_SECRET" | base64)"
@@ -285,26 +303,16 @@ export HCP_CLIENT_SECRET_B64=$(echo -n "$HCP_CLIENT_SECRET" | base64)
 export HCP_CLIENT_ID_B64=$(echo -n "$HCP_CLIENT_ID" | base64)
 ```
 
-Build Dockerfile for self-signed cert
-
-```sh
-# Build Custom Docker Image
-cd Radar
-docker build -t vault-radar-custom:latest .
-
-# Load image into Minikube
-minikube image load vault-radar-custom:latest
-
-# Verify the image is loaded
-minikube image ls | grep vault-radar-custom
-
-```
-
 # Troubleshooting
+
+Jira
 
 https://nginx-service.jira.svc.cluster.local
 
 http://jira-service.jira.svc.cluster.local:8080/jira
+
+Confluence
+https://nginx-service.confluence.svc.cluster.local
 
 ```sh {"terminalRows":"38"}
 kubectl logs -n vault-radar deployment/vault-radar-agent
@@ -316,12 +324,176 @@ kubectl exec -it -n vault-radar deployment/vault-radar-agent -- /bin/sh
 ```
 
 ```sh
-# wget webhook test
+# URL
 
-wget --header="Authorization: Bearer $JIRA_TOKEN" https://nginx-service.jira.svc.cluster.local/rest/jira-webhook/1.0/webhooks
 ```
 
-### Error Message
+```sh
+# Create a Policy
+vault policy write -namespace=admin radar radar.hcl 
 
-time="2025-08-13T05:34:06Z" level=info msg="received response" job_id=cecd5af4-9536-42df-ac6d-e23e4e086ffb method=GET status_code=404 url="https://nginx-service.jira.svc.cluster.local/rest/jira-webhook/1.0/webhooks" worker="HTTP job"
-/rest/webhooks/1.0/webhook
+# Test Policy[To convert to script]
+vault secrets enable -namespace=admin -path=confluence kv-v2
+vault secrets enable -namespace=admin -path=jira kv-v2
+
+vault kv put jira/exampleapp/1 \
+   password='Password123'
+
+vault kv put static/exampleapp/1 \
+   username='jalbertson' \
+   password='b3stp@stw00rd3vA!'
+
+vault kv list jira/exampleapp
+vault kv list static/exampleapp
+
+vault kv get jira/exampleapp/1
+vault kv get jira/exampleapp/1
+
+vault kv get static/exampleapp/2
+vault kv get static/exampleapp/1
+
+```
+
+```sh
+# Create a Kubernetes Secret for the vault-radar-agent Kubernetes service account.
+kubectl create -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-radar-agent
+  namespace: vault-radar
+  annotations:
+    kubernetes.io/service-account.name: vault-radar-agent
+type: kubernetes.io/service-account-token
+---
+EOF
+```
+
+```sh
+kubectl proxy --disable-filter=true # ENSURE THIS IS RUNNING IN BACKGROUND
+```
+
+```sh
+ngrok http --url http:// 127.0.0.1:8001  # ENSURE THIS IS RUNNING IN BACKGROUND
+```
+
+```sh
+# Decode env variable 
+export K8S_URL="http://93599f08af82.ngrok-free.app" # Replace with your actual ngrok URL
+export VAULTSA_SECRET=$(kubectl get secret --namespace vault-radar vault-radar-agent --output json | jq -r '.data') \
+    && echo $VAULTSA_SECRET
+export K8S_CA_CRT=$(echo $VAULTSA_SECRET | jq -r '."ca.crt"' | base64 -d) && echo $K8S_CA_CRT
+export VAULTSA_TOKEN=$(echo $VAULTSA_SECRET | jq -r '.token' | base64 -d) && echo $VAULTSA_TOKEN
+```
+
+```sh
+vault auth enable kubernetes
+```
+
+```sh
+vault write auth/kubernetes/config \
+ token_reviewer_jwt=$VAULTSA_TOKEN \
+ kubernetes_host=$K8S_URL \
+ kubernetes_ca_cert=$K8S_CA_CRT
+```
+
+```sh
+vault write auth/kubernetes/role/vault-radar-agent-role \
+    bound_service_account_names=vault-radar-agent \
+    bound_service_account_namespaces=vault-radar \
+    policies=radar 
+
+# Delete Role
+vault delete -namespace=admin auth/kubernetes/role/vault-radar-agent-role
+
+# Read role
+vault read -namespace=admin -format=json auth/kubernetes/role/vault-radar-agent-role
+
+```
+
+```sh
+vault write -namespace="admin" -format=json auth/kubernetes/login \
+        role=vault-radar-agent \
+        jwt="$VAULTSA_TOKEN"
+
+
+TOKEN_PAYLOAD=$(echo "$TOKEN" | cut -d '.' -f2 | tr '_-' '/+' | awk '{l=length($0)%4; if (l==2) print $0 "=="; else if (l==3) print $0 "="; else print $0; }')
+echo "$TOKEN_PAYLOAD" | base64 --decode | jq .
+
+
+```
+
+```sh
+export VAULT_SA_NAME=$(kubectl -n vault-radar get sa vault-radar-agent -o jsonpath="{.secrets[0].name}")
+
+```
+
+## GitHub Configuration 
+
+Go to and configure : https://github.com/apps/hashicorp-vault-radar-checks-app
+
+Example Installation Page: https://github.com/organizations/jessicahm-org/settings/installations/74288876
+
+Create a PAT in GITHUB: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token
+
+Branch Protection: https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule
+
+Ensure PR Check are enabled
+<img src="PRCheck.png"></img>
+
+```sh
+kubectl exec -it -n vault-radar deployment/vault-radar-agent -- /bin/sh
+```
+
+## Clean-up
+
+```sh
+kubectl delete all --all -n confluence
+kubectl delete all --all -n jira
+
+# Clean up all resources in minikube
+minikube delete
+
+```
+
+```sh
+# Method 3: Create secret from files (if you have secret files)
+# kubectl create secret generic vault-radar-secrets \
+#   --from-file=HCP_CLIENT_SECRET=./hcp-secret.txt \
+#   --from-file=VAULT_RADAR_GIT_TOKEN=./git-token.txt \
+#   --namespace=vault-radar
+
+# Verify the secret was created
+kubectl get secrets -n vault-radar
+kubectl describe secret vault-radar-secrets -n vault-radar
+```
+
+### Understanding Kubernetes Secrets
+
+**Secret Types:**
+- `generic` (Opaque): General purpose key-value data  
+- `tls`: TLS certificates (like nginx-tls we created earlier)
+- `docker-registry`: Docker registry credentials
+- `service-account-token`: Service account tokens
+
+**Key Points:**
+- Secrets are base64 encoded (NOT encrypted by default)
+- Use `stringData` instead of `data` to avoid manual base64 encoding
+- Secrets must be in the same namespace as the pods that use them
+
+```sh
+# Apply the secret to Kubernetes
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-radar-secrets-simple
+  namespace: vault-radar
+type: Opaque
+data:
+  HCP_CLIENT_SECRET: "$HCP_CLIENT_SECRET_BASE64"
+  VAULT_RADAR_GIT_TOKEN: "$VAULT_RADAR_GIT_TOKEN_B64"
+EOF
+```
+
+## 
