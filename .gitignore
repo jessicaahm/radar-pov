@@ -3,3 +3,5 @@
 .key
 */*.crt
 */*.key
+*/confluence.yaml-backup
+*/confluence.yaml

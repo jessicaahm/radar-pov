@@ -19,7 +19,7 @@ kubectl get all --all-namespaces
 minikube status
 ```
 
-## Confluence
+## Confluence [Not working - This should be moved to use helm/eks]
 
 Reference: https://hub.docker.com/r/atlassian/confluence-server
 
@@ -34,11 +34,23 @@ openssl req -new -x509 -key tls.key -out tls.crt -days 365 \
 ```
 
 ```sh
+#Create namespace
+kubectl create namespace confluence
+
+# Deploy configmap
+cd ./Confluence
+kubectl create configmap confluence-server-xml-file --from-file=server.xml=server.xml -n confluence
+```
+
+```sh
 # Verify ConfigMap was created
 kubectl get configmap confluence-server-xml-file -n confluence
 
 # View the full ConfigMap YAML (including the server.xml content)
 kubectl get configmap confluence-server-xml-file -n confluence -o yaml
+
+# Delete the ConfigMap
+kubectl delete configmap confluence-server-xml-file -n confluence
 ```
 
 ```sh {"terminalRows":"11"}
@@ -49,11 +61,24 @@ kubectl apply -f confluence-manifest.yaml -n confluence
 
 ```sh
 # Start minikube tunnel (run in background)
-minikube tunnel
+minikube tunnel&
+
+sudo kubectl port-forward -n confluence svc/confluence-loadbalancer 8090:8090
+sudo kubectl port-forward -n confluence svc/nginx-service 443:443
 ```
 
 ```sh
 kubectl get svc -n confluence
+kubectl get pods -n confluence
+kubectl get endpoints -n confluence
+```
+
+```sh
+kubectl exec -it -n confluence deployment/confluence-server -- /bin/sh
+
+# Verify it is running
+curl http://localhost:8090/status
+
 ```
 
 ## Troubleshooting to reduce size (memory)
@@ -466,34 +491,6 @@ minikube delete
 # Verify the secret was created
 kubectl get secrets -n vault-radar
 kubectl describe secret vault-radar-secrets -n vault-radar
-```
-
-### Understanding Kubernetes Secrets
-
-**Secret Types:**
-- `generic` (Opaque): General purpose key-value data  
-- `tls`: TLS certificates (like nginx-tls we created earlier)
-- `docker-registry`: Docker registry credentials
-- `service-account-token`: Service account tokens
-
-**Key Points:**
-- Secrets are base64 encoded (NOT encrypted by default)
-- Use `stringData` instead of `data` to avoid manual base64 encoding
-- Secrets must be in the same namespace as the pods that use them
-
-```sh
-# Apply the secret to Kubernetes
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-metadata:
-  name: vault-radar-secrets-simple
-  namespace: vault-radar
-type: Opaque
-data:
-  HCP_CLIENT_SECRET: "$HCP_CLIENT_SECRET_BASE64"
-  VAULT_RADAR_GIT_TOKEN: "$VAULT_RADAR_GIT_TOKEN_B64"
-EOF
 ```
 
 ## 
